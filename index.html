@@ -77,7 +77,7 @@
 <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 <script>
 const apiBase = "https://hinime-two.vercel.app/api/";
-const proxyBase = "https://cors-proxy.dezzdano.workers.dev/?url=";
+const proxy = "https://cors-proxy.dezzdano.workers.dev/?url=";
 
 const searchInput = document.getElementById('search');
 const searchResults = document.getElementById('searchResults');
@@ -109,7 +109,7 @@ function loadAnime(id) {
     fetch(apiBase+`episodes/${id}`).then(r=>r.json()).then(eps=>{
       const epWrap = document.getElementById('episodes');
       eps.results.episodes.forEach(e=>{
-        let badge = `<span style='color:${e.filler?"#f55":"#5f5"}'>${e.filler?"Filler":"Canon"}</span>`;
+        let badge = `<span style='color:${e.filler?"#f55":"#5f5"};font-weight:bold'>${e.filler?"Filler":"Canon"}</span>`;
         let label = e.title ? `${e.episode_no}. ${e.title}` : `Episode ${e.episode_no}`;
         epWrap.innerHTML += `<button onclick="loadServers('${e.id}')">${label} ${badge}</button> `;
       });
@@ -124,56 +124,46 @@ function loadServers(epId){
   fetch(apiBase+`servers/${epId}`).then(r=>r.json()).then(d=>{
     const subs = d.results.filter(s=>s.type==='sub');
     const dubs = d.results.filter(s=>s.type==='dub');
-    let serversHTML = `<h4>Servers</h4>`;
-
-    if(subs.length){
-      serversHTML += `<h5 style="color:#5f5;">Sub</h5>`;
-      serversHTML += subs.map(s=>`<button onclick="playStream('${epId}','${s.serverName}','sub')">${s.serverName}</button>`).join(' ');
-    }
-    if(dubs.length){
-      serversHTML += `<h5 style="color:#ff3cac;">Dub</h5>`;
-      serversHTML += dubs.map(s=>`<button onclick="playStream('${epId}','${s.serverName}','dub')">${s.serverName}</button>`).join(' ');
-    }
-
-    let existing = document.getElementById(`servers-${epId}`);
-    if(existing) existing.remove();
-
-    let serversDiv = document.createElement('div');
-    serversDiv.id = `servers-${epId}`;
-    serversDiv.innerHTML = serversHTML;
-    document.getElementById('modalBody').appendChild(serversDiv);
+    let subBtns = subs.map(s=>`<button onclick="playStream('${epId}','${s.serverName}')">${s.serverName}</button>`).join(' ');
+    let dubBtns = dubs.map(s=>`<button onclick="playStream('${epId}','${s.serverName}')">${s.serverName}</button>`).join(' ');
+    let serversHTML = '';
+    if(subs.length) serversHTML += `<h4>Sub Servers</h4>${subBtns}`;
+    if(dubs.length) serversHTML += `<h4>Dub Servers</h4>${dubBtns}`;
+    document.getElementById('modalBody').innerHTML += serversHTML;
   });
 }
 
-function playStream(id, server, type){
-  fetch(apiBase+`stream?id=${id}&server=${server}&type=${type}`)
-    .then(r=>r.json()).then(d=>{
-      const player = document.getElementById('animePlayer');
-      const src = d.results?.streamingLink?.link?.file;
-      if(!src) return alert("Stream unavailable.");
-      const proxiedSrc = proxyBase + encodeURIComponent(src);
+function playStream(id, server){
+  fetch(apiBase+`stream?id=${id}&server=${server}&type=sub`).then(r=>r.json()).then(d=>{
+    const player = document.getElementById('animePlayer');
+    const originalSrc = d.results?.streamingLink?.link?.file;
+    if (!originalSrc) return alert("Stream not available for this server.");
+    const proxiedSrc = proxy + encodeURIComponent(originalSrc);
 
-      if(Hls.isSupported()){
-        const hls = new Hls();
-        hls.loadSource(proxiedSrc);
-        hls.attachMedia(player);
-      } else {
-        player.src = proxiedSrc;
-      }
+    if (Hls.isSupported()) {
+      const hls = new Hls();
+      hls.loadSource(proxiedSrc);
+      hls.attachMedia(player);
+    } else {
+      player.src = proxiedSrc;
+    }
 
-      Array.from(player.querySelectorAll("track")).forEach(t=>t.remove());
-      if(d.results.streamingLink.tracks){
-        d.results.streamingLink.tracks.forEach(track=>{
+    player.innerHTML = '';
+    if (d.results.streamingLink.tracks) {
+      d.results.streamingLink.tracks.forEach(track => {
+        if (track.kind === "captions") {
           const trackElem = document.createElement("track");
-          trackElem.src = proxyBase + encodeURIComponent(track.file);
+          trackElem.src = proxy + encodeURIComponent(track.file);
           trackElem.kind = "subtitles";
           trackElem.label = track.label;
-          if(track.default) trackElem.default = true;
+          if (track.default) trackElem.default = true;
           player.appendChild(trackElem);
-        });
-      }
-      document.getElementById('playerModal').style.display='flex';
-    });
+        }
+      });
+    }
+
+    document.getElementById('playerModal').style.display = 'flex';
+  }).catch(e=>alert("Failed to fetch stream."));
 }
 
 function closeModal(){ document.getElementById('animeModal').style.display='none'; }
