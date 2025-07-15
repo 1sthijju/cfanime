@@ -33,6 +33,9 @@
     #recommended div { flex:0 0 auto; width:90px; cursor:pointer; text-align:center; }
     #recommended img { width:100%; height:120px; object-fit:cover; border-radius:6px; }
     #recommended p { font-size:12px; margin:4px 0 0; }
+    .loading { text-align:center; padding:20px; color:#ff3cac; }
+    .server-btn { background:#333; color:#fff; padding:8px 12px; margin:4px; border:none; border-radius:4px; cursor:pointer; }
+    .server-btn:hover { background:#ff3cac; }
   </style>
 </head>
 <body>
@@ -77,7 +80,8 @@
 <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 <script>
 const apiBase = "https://hinime-two.vercel.app/api/";
-const proxy = "https://cfanime.pages.dev/api/proxy?url=";
+// Use relative path for your Cloudflare Pages proxy
+const proxy = "/api/proxy?url=";
 
 const searchInput = document.getElementById('search');
 const searchResults = document.getElementById('searchResults');
@@ -111,7 +115,7 @@ function loadAnime(id) {
       eps.results.episodes.forEach(e=>{
         let badge = `<span style='color:${e.filler?"#f55":"#5f5"};font-weight:bold'>${e.filler?"Filler":"Canon"}</span>`;
         let label = e.title ? `${e.episode_no}. ${e.title}` : `Episode ${e.episode_no}`;
-        epWrap.innerHTML += `<button onclick="loadServers('${e.id}')">${label} ${badge}</button> `;
+        epWrap.innerHTML += `<button class="server-btn" onclick="loadServers('${e.id}')">${label} ${badge}</button> `;
       });
     });
 
@@ -121,60 +125,124 @@ function loadAnime(id) {
 }
 
 function loadServers(epId){
+  const modalBody = document.getElementById('modalBody');
+  modalBody.innerHTML += '<div class="loading">Loading servers...</div>';
+  
   fetch(apiBase+`servers/${epId}`).then(r=>r.json()).then(d=>{
+    // Remove loading message
+    const loading = modalBody.querySelector('.loading');
+    if(loading) loading.remove();
+    
     const subs = d.results.filter(s=>s.type==='sub');
     const dubs = d.results.filter(s=>s.type==='dub');
-    let subBtns = subs.map(s=>`<button onclick="playStream('${epId}','${s.serverName}')">${s.serverName}</button>`).join(' ');
-    let dubBtns = dubs.map(s=>`<button onclick="playStream('${epId}','${s.serverName}')">${s.serverName}</button>`).join(' ');
+    let subBtns = subs.map(s=>`<button class="server-btn" onclick="playStream('${epId}','${s.serverName}','sub')">${s.serverName}</button>`).join(' ');
+    let dubBtns = dubs.map(s=>`<button class="server-btn" onclick="playStream('${epId}','${s.serverName}','dub')">${s.serverName}</button>`).join(' ');
     let serversHTML = '';
     if(subs.length) serversHTML += `<h4>Sub Servers</h4>${subBtns}`;
     if(dubs.length) serversHTML += `<h4>Dub Servers</h4>${dubBtns}`;
-    document.getElementById('modalBody').innerHTML += serversHTML;
+    modalBody.innerHTML += serversHTML;
+  }).catch(e=>{
+    const loading = modalBody.querySelector('.loading');
+    if(loading) loading.innerHTML = 'Failed to load servers';
   });
 }
 
-function playStream(id, server){
-  fetch(apiBase+`stream?id=${id}&server=${server}&type=sub`).then(r=>r.json()).then(d=>{
-    const player = document.getElementById('animePlayer');
-    const originalSrc = d.results?.streamingLink?.link?.file;
-    if (!originalSrc) return alert("Stream not available for this server.");
-    const proxiedSrc = proxy + encodeURIComponent(originalSrc);
+function playStream(id, server, type = 'sub'){
+  const player = document.getElementById('animePlayer');
+  
+  fetch(apiBase+`stream?id=${id}&server=${server}&type=${type}`)
+    .then(r=>r.json())
+    .then(d=>{
+      const originalSrc = d.results?.streamingLink?.link?.file;
+      if (!originalSrc) {
+        alert("Stream not available for this server.");
+        return;
+      }
+      
+      // Use the proxy for the main stream
+      const proxiedSrc = proxy + encodeURIComponent(originalSrc);
+      
+      // Clear existing player content
+      player.innerHTML = '';
+      
+      // Setup HLS or direct video
+      if (Hls.isSupported() && originalSrc.includes('.m3u8')) {
+        const hls = new Hls({
+          xhrSetup: function(xhr, url) {
+            // Add any additional headers if needed
+            xhr.setRequestHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
+          }
+        });
+        hls.loadSource(proxiedSrc);
+        hls.attachMedia(player);
+        
+        hls.on(Hls.Events.ERROR, function(event, data) {
+          console.error('HLS Error:', data);
+          if (data.fatal) {
+            alert('Streaming error occurred. Please try another server.');
+          }
+        });
+      } else {
+        player.src = proxiedSrc;
+      }
 
-    if (Hls.isSupported()) {
-      const hls = new Hls();
-      hls.loadSource(proxiedSrc);
-      hls.attachMedia(player);
-    } else {
-      player.src = proxiedSrc;
-    }
+      // Add subtitle tracks if available
+      if (d.results.streamingLink.tracks) {
+        d.results.streamingLink.tracks.forEach(track => {
+          if (track.kind === "captions" || track.kind === "subtitles") {
+            const trackElem = document.createElement("track");
+            trackElem.src = proxy + encodeURIComponent(track.file);
+            trackElem.kind = "subtitles";
+            trackElem.label = track.label || "Default";
+            trackElem.srclang = track.language || "en";
+            if (track.default) trackElem.default = true;
+            player.appendChild(trackElem);
+          }
+        });
+      }
 
-    player.innerHTML = '';
-    if (d.results.streamingLink.tracks) {
-      d.results.streamingLink.tracks.forEach(track => {
-        if (track.kind === "captions") {
-          const trackElem = document.createElement("track");
-          trackElem.src = proxy + encodeURIComponent(track.file);
-          trackElem.kind = "subtitles";
-          trackElem.label = track.label;
-          if (track.default) trackElem.default = true;
-          player.appendChild(trackElem);
-        }
+      document.getElementById('playerModal').style.display = 'flex';
+      
+      // Add error handling for the video element
+      player.addEventListener('error', function(e) {
+        console.error('Video Error:', e);
+        alert('Failed to load video. Please try another server.');
       });
-    }
-
-    document.getElementById('playerModal').style.display = 'flex';
-  }).catch(e=>alert("Failed to fetch stream."));
+      
+    })
+    .catch(e=>{
+      console.error('Stream fetch error:', e);
+      alert("Failed to fetch stream. Please try another server.");
+    });
 }
 
-function closeModal(){ document.getElementById('animeModal').style.display='none'; }
-function closePlayer(){ document.getElementById('playerModal').style.display='none'; }
+function closeModal(){ 
+  document.getElementById('animeModal').style.display='none'; 
+}
 
+function closePlayer(){ 
+  const player = document.getElementById('animePlayer');
+  player.pause();
+  player.src = '';
+  document.getElementById('playerModal').style.display='none'; 
+}
+
+// Click outside modal to close
+document.getElementById('animeModal').addEventListener('click', function(e) {
+  if (e.target === this) closeModal();
+});
+
+document.getElementById('playerModal').addEventListener('click', function(e) {
+  if (e.target === this) closePlayer();
+});
+
+// Load initial data
 fetch(apiBase).then(r=>r.json()).then(data=>{
   const s = document.getElementById('spotlight');
   data.results.spotlights.forEach(a=>{
     const card = document.createElement('div');
     card.className = 'spotlight-card';
-    card.innerHTML = `<img src="${a.poster}"><p>${a.title}</p>`;
+    card.innerHTML = `<img src="${a.poster}" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjI2MCIgdmlld0JveD0iMCAwIDIwMCAyNjAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxyZWN0IHdpZHRoPSIyMDAiIGhlaWdodD0iMjYwIiBmaWxsPSIjMzMzIi8+Cjx0ZXh0IHg9IjEwMCIgeT0iMTMwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjNjY2IiBmb250LWZhbWlseT0iQXJpYWwiIGZvbnQtc2l6ZT0iMTQiPk5vIEltYWdlPC90ZXh0Pgo8L3N2Zz4K'"><p>${a.title}</p>`;
     card.onclick = () => loadAnime(a.id);
     s.appendChild(card);
   });
@@ -183,7 +251,7 @@ fetch(apiBase).then(r=>r.json()).then(data=>{
   data.results.latestEpisode.forEach(a=>{
     const card = document.createElement('div');
     card.className = 'anime-card';
-    card.innerHTML = `<img src="${a.poster}"><p>${a.title}</p>`;
+    card.innerHTML = `<img src="${a.poster}" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTMwIiBoZWlnaHQ9IjE4MCIgdmlld0JveD0iMCAwIDEzMCAxODAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxyZWN0IHdpZHRoPSIxMzAiIGhlaWdodD0iMTgwIiBmaWxsPSIjMzMzIi8+Cjx0ZXh0IHg9IjY1IiB5PSI5MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzY2NiIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIj5ObyBJbWFnZTwvdGV4dD4KPHN2Zz4K'"><p>${a.title}</p>`;
     card.onclick = () => loadAnime(a.id);
     l.appendChild(card);
   });
@@ -192,10 +260,12 @@ fetch(apiBase).then(r=>r.json()).then(data=>{
   data.results.trending.forEach(a=>{
     const card = document.createElement('div');
     card.className = 'anime-card';
-    card.innerHTML = `<img src="${a.poster}"><p>#${a.number} ${a.title}</p>`;
+    card.innerHTML = `<img src="${a.poster}" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTMwIiBoZWlnaHQ9IjE4MCIgdmlld0JveD0iMCAwIDEzMCAxODAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxyZWN0IHdpZHRoPSIxMzAiIGhlaWdodD0iMTgwIiBmaWxsPSIjMzMzIi8+Cjx0ZXh0IHg9IjY1IiB5PSI5MCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzY2NiIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjEyIj5ObyBJbWFnZTwvdGV4dD4KPHN2Zz4K'"><p>#${a.number} ${a.title}</p>`;
     card.onclick = () => loadAnime(a.id);
     t.appendChild(card);
   });
+}).catch(e=>{
+  console.error('Failed to load initial data:', e);
 });
 </script>
 </body>
