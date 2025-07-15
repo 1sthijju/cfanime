@@ -1,216 +1,171 @@
-//install wrangle and init a project to initialize the worker
-
-// Media streaming CORS proxy with M3U8 and subtitle support
-const express = require('express');
-const cors = require('cors');
-const { createProxyMiddleware } = require('http-proxy-middleware');
-const axios = require('axios');
-
-const app = express();
-const PORT = process.env.PORT || 3001;
-
-// Enable CORS for all routes
-app.use(cors({
-  origin: '*', // Change to your domain in production
-  credentials: true,
-}));
-
-// Add comprehensive CORS headers
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Range');
-  res.header('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length, Content-Type');
+// functions/api/proxy.js
+export async function onRequest(context) {
+  const { request, env } = context;
+  const url = new URL(request.url);
+  const targetUrl = url.searchParams.get('url');
   
-  if (req.method === 'OPTIONS') {
-    res.sendStatus(200);
-  } else {
-    next();
+  // Handle CORS preflight requests
+  if (request.method === 'OPTIONS') {
+    return new Response(null, {
+      status: 200,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS, HEAD',
+        'Access-Control-Allow-Headers': 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Range',
+        'Access-Control-Max-Age': '86400',
+      }
+    });
   }
-});
 
-// Specialized M3U8 proxy endpoint
-app.get('/m3u8', async (req, res) => {
-  const targetUrl = req.query.url;
-  
   if (!targetUrl) {
-    return res.status(400).json({ error: 'URL parameter is required' });
+    return new Response(JSON.stringify({ error: 'URL parameter is required' }), {
+      status: 400,
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*'
+      }
+    });
   }
 
   try {
-    const response = await axios.get(targetUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': new URL(targetUrl).origin,
-        ...req.headers.authorization && { 'Authorization': req.headers.authorization }
-      },
-      responseType: 'text'
-    });
-
-    // Set appropriate headers for M3U8
-    res.set({
-      'Content-Type': 'application/x-mpegURL',
-      'Cache-Control': 'no-cache',
-      'Access-Control-Allow-Origin': '*'
-    });
-
-    // Modify M3U8 content to proxy segment URLs
-    let m3u8Content = response.data;
-    const baseUrl = new URL(targetUrl);
+    // Handle M3U8 playlists
+    if (targetUrl.includes('.m3u8') || url.pathname.includes('/m3u8')) {
+      return await handleM3U8(request, targetUrl, url.origin);
+    }
     
-    // Replace relative URLs with proxied URLs
-    m3u8Content = m3u8Content.replace(/^(?!#)(?!http)(.+)$/gm, (match) => {
-      const segmentUrl = new URL(match.trim(), baseUrl.href).href;
-      return `http://localhost:${PORT}/segment?url=${encodeURIComponent(segmentUrl)}`;
-    });
+    // Handle subtitle files
+    if (targetUrl.match(/\.(vtt|srt|ass|ssa)$/i) || url.pathname.includes('/subtitle')) {
+      return await handleSubtitle(request, targetUrl);
+    }
+    
+    // Handle general proxy requests
+    return await handleProxy(request, targetUrl);
 
-    res.send(m3u8Content);
   } catch (error) {
-    console.error('M3U8 Proxy Error:', error.message);
-    res.status(500).json({ error: 'Failed to fetch M3U8 playlist' });
-  }
-});
-
-// Video segment proxy
-app.get('/segment', createProxyMiddleware({
-  target: 'http://localhost:3000',
-  changeOrigin: true,
-  router: (req) => {
-    const targetUrl = req.query.url;
-    if (!targetUrl) return null;
-    
-    try {
-      const url = new URL(targetUrl);
-      return `${url.protocol}//${url.host}`;
-    } catch (error) {
-      return null;
-    }
-  },
-  pathRewrite: (path, req) => {
-    const targetUrl = req.query.url;
-    if (!targetUrl) return path;
-    
-    try {
-      const url = new URL(targetUrl);
-      return url.pathname + url.search;
-    } catch (error) {
-      return path;
-    }
-  },
-  onProxyReq: (proxyReq, req, res) => {
-    // Add headers for video segments
-    proxyReq.setHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
-    proxyReq.setHeader('Referer', new URL(req.query.url).origin);
-  },
-  onProxyRes: (proxyRes, req, res) => {
-    // Ensure CORS headers on video segments
-    proxyRes.headers['Access-Control-Allow-Origin'] = '*';
-    proxyRes.headers['Access-Control-Expose-Headers'] = 'Content-Range, Accept-Ranges, Content-Length';
-  }
-}));
-
-// Subtitle proxy endpoint
-app.get('/subtitle', async (req, res) => {
-  const targetUrl = req.query.url;
-  
-  if (!targetUrl) {
-    return res.status(400).json({ error: 'URL parameter is required' });
-  }
-
-  try {
-    const response = await axios.get(targetUrl, {
+    console.error('Proxy Error:', error);
+    return new Response(JSON.stringify({ 
+      error: 'Proxy request failed',
+      details: error.message 
+    }), {
+      status: 500,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': new URL(targetUrl).origin,
-        ...req.headers.authorization && { 'Authorization': req.headers.authorization }
-      },
-      responseType: 'text'
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*'
+      }
     });
-
-    // Detect subtitle format and set appropriate content type
-    const url = new URL(targetUrl);
-    const extension = url.pathname.split('.').pop().toLowerCase();
-    
-    let contentType = 'text/plain';
-    if (extension === 'vtt') {
-      contentType = 'text/vtt';
-    } else if (extension === 'srt') {
-      contentType = 'application/x-subrip';
-    } else if (extension === 'ass' || extension === 'ssa') {
-      contentType = 'text/x-ass';
-    }
-
-    res.set({
-      'Content-Type': contentType,
-      'Access-Control-Allow-Origin': '*'
-    });
-
-    res.send(response.data);
-  } catch (error) {
-    console.error('Subtitle Proxy Error:', error.message);
-    res.status(500).json({ error: 'Failed to fetch subtitle file' });
-  }
-});
-
-// General proxy endpoint for other requests
-app.use('/proxy', createProxyMiddleware({
-  target: 'http://localhost:3000',
-  changeOrigin: true,
-  pathRewrite: {
-    '^/proxy': '',
-  },
-  router: (req) => {
-    const targetUrl = req.query.url;
-    if (!targetUrl) return null;
-    
-    try {
-      const url = new URL(targetUrl);
-      return `${url.protocol}//${url.host}`;
-    } catch (error) {
-      return null;
-    }
-  },
-  onProxyReq: (proxyReq, req, res) => {
-    proxyReq.setHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
-  },
-  onProxyRes: (proxyRes, req, res) => {
-    proxyRes.headers['Access-Control-Allow-Origin'] = '*';
-  }
-}));
-
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    timestamp: new Date().toISOString(),
-    endpoints: {
-      m3u8: '/m3u8?url=TARGET_URL',
-      subtitle: '/subtitle?url=TARGET_URL',
-      general: '/proxy?url=TARGET_URL'
-    }
-  });
-});
-
-app.listen(PORT, () => {
-  console.log(`Media Streaming CORS Proxy running on port ${PORT}`);
-  console.log(`M3U8 Proxy: http://localhost:${PORT}/m3u8?url=TARGET_URL`);
-  console.log(`Subtitle Proxy: http://localhost:${PORT}/subtitle?url=TARGET_URL`);
-  console.log(`General Proxy: http://localhost:${PORT}/proxy?url=TARGET_URL`);
-});
-
-/*
-Package.json dependencies:
-{
-  "name": "media-cors-proxy",
-  "version": "1.0.0",
-  "dependencies": {
-    "express": "^4.18.2",
-    "cors": "^2.8.5",
-    "http-proxy-middleware": "^2.0.6",
-    "axios": "^1.6.0"
-  },
-  "scripts": {
-    "start": "node server.js"
   }
 }
-*/
+
+async function handleM3U8(request, targetUrl, workerOrigin) {
+  const response = await fetch(targetUrl, {
+    method: request.method,
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+      'Referer': new URL(targetUrl).origin,
+      'Accept': 'application/x-mpegURL, application/vnd.apple.mpegurl, application/vnd.apple.mpegurl.audio',
+      ...getAuthHeaders(request)
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  }
+
+  let m3u8Content = await response.text();
+  const baseUrl = new URL(targetUrl);
+  
+  // Replace relative URLs with proxied URLs
+  m3u8Content = m3u8Content.replace(/^(?!#)(?!http)(.+)$/gm, (match) => {
+    const trimmedMatch = match.trim();
+    if (trimmedMatch && !trimmedMatch.startsWith('#')) {
+      const segmentUrl = new URL(trimmedMatch, baseUrl.href).href;
+      return `${workerOrigin}/api/proxy?url=${encodeURIComponent(segmentUrl)}`;
+    }
+    return match;
+  });
+
+  return new Response(m3u8Content, {
+    headers: {
+      'Content-Type': 'application/x-mpegURL',
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges'
+    }
+  });
+}
+
+async function handleSubtitle(request, targetUrl) {
+  const response = await fetch(targetUrl, {
+    method: request.method,
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+      'Referer': new URL(targetUrl).origin,
+      ...getAuthHeaders(request)
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  }
+
+  // Detect subtitle format from URL
+  const url = new URL(targetUrl);
+  const extension = url.pathname.split('.').pop().toLowerCase();
+  
+  let contentType = 'text/plain';
+  if (extension === 'vtt') {
+    contentType = 'text/vtt';
+  } else if (extension === 'srt') {
+    contentType = 'application/x-subrip';
+  } else if (extension === 'ass' || extension === 'ssa') {
+    contentType = 'text/x-ass';
+  }
+
+  const content = await response.text();
+  
+  return new Response(content, {
+    headers: {
+      'Content-Type': contentType,
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'public, max-age=3600'
+    }
+  });
+}
+
+async function handleProxy(request, targetUrl) {
+  const response = await fetch(targetUrl, {
+    method: request.method,
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+      'Referer': new URL(targetUrl).origin,
+      'Range': request.headers.get('Range'),
+      ...getAuthHeaders(request)
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  }
+
+  // Create new response with CORS headers
+  const newResponse = new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: {
+      ...Object.fromEntries(response.headers),
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Expose-Headers': 'Content-Range, Accept-Ranges, Content-Length, Content-Type'
+    }
+  });
+
+  return newResponse;
+}
+
+function getAuthHeaders(request) {
+  const headers = {};
+  const auth = request.headers.get('Authorization');
+  if (auth) {
+    headers['Authorization'] = auth;
+  }
+  return headers;
+}
